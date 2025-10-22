@@ -1,47 +1,56 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+DNS客户端实现
+支持A、AAAA、CNAME、NS、MX查询类型
+支持递归查询(RD=1)和迭代查询(RD=0)
+"""
+
 import socket
 import struct
 import random
 import time
+import dns.resolver
+import dns.query
+import dns.message
+import dns.name
+import dns.rdatatype
 
 class DNSClient:
     def __init__(self):
-        # DNS查询类型映射
         self.query_types = {
-            'A': 1,      # IPv4地址
-            'AAAA': 28,  # IPv6地址
-            'CNAME': 5,  # 别名
-            'NS': 2,     # 域名服务器
-            'MX': 15     # 邮件交换
+            'A': 1,
+            'AAAA': 28,
+            'CNAME': 5,
+            'NS': 2,
+            'MX': 15
         }
         
-        # 根DNS服务器列表
         self.root_servers = [
-            '198.41.0.4',      # a.root-servers.net
-            '199.9.14.201',    # b.root-servers.net
-            '192.33.4.12',     # c.root-servers.net
-            '199.7.91.13',     # d.root-servers.net
-            '192.203.230.10',  # e.root-servers.net
-            '192.5.5.241',     # f.root-servers.net
-            '192.112.36.4',    # g.root-servers.net
-            '198.97.190.53',   # h.root-servers.net
-            '192.36.148.17',   # i.root-servers.net
-            '192.58.128.30',  # j.root-servers.net
-            '193.0.14.129',    # k.root-servers.net
-            '199.7.83.42',     # l.root-servers.net
-            '202.12.27.33'     # m.root-servers.net
+            '198.41.0.4',
+            '199.9.14.201',
+            '192.33.4.12',
+            '199.7.91.13',
+            '192.203.230.10',
+            '192.5.5.241',
+            '192.112.36.4',
+            '198.97.190.53',
+            '192.36.148.17',
+            '192.58.128.30',
+            '193.0.14.129',
+            '199.7.83.42',
+            '202.12.27.33'
         ]
     
     def encode_domain_name(self, domain):
-        """将域名编码为DNS格式"""
         parts = domain.split('.')
         encoded = b''
         for part in parts:
             encoded += struct.pack('B', len(part)) + part.encode()
-        encoded += b'\x00' 
+        encoded += b'\x00'
         return encoded
     
     def decode_domain_name(self, data, offset):
-        """解码DNS格式的域名"""
         labels = []
         original_offset = offset
         
@@ -51,7 +60,7 @@ class DNSClient:
             
             if length == 0:
                 break
-            elif length & 0xC0 == 0xC0: 
+            elif length & 0xC0 == 0xC0:
                 pointer = ((length & 0x3F) << 8) | data[offset]
                 offset += 1
                 compressed_labels, _ = self.decode_domain_name(data, pointer)
@@ -65,9 +74,8 @@ class DNSClient:
         return labels, offset
     
     def create_dns_query(self, domain, query_type, rd_flag=1):
-        """创建DNS查询包"""
         transaction_id = random.randint(1, 65535)
-        flags = 0x0100 if rd_flag else 0x0000  
+        flags = 0x0100 if rd_flag else 0x0000
         questions = 1
         answers = 0
         authority = 0
@@ -79,14 +87,13 @@ class DNSClient:
         
         qname = self.encode_domain_name(domain)
         qtype = self.query_types[query_type]
-        qclass = 1  # IN (Internet)
+        qclass = 1
         
         query = struct.pack('!HH', qtype, qclass)
         
         return header + qname + query, transaction_id
     
     def parse_dns_response(self, data):
-        """解析DNS响应"""
         if len(data) < 12:
             return None
         
@@ -100,10 +107,10 @@ class DNSClient:
             'answers': answers,
             'authority': authority,
             'additional': additional,
-            'aa': bool(flags & 0x0400), 
-            'rd': bool(flags & 0x0100), 
-            'ra': bool(flags & 0x0080), 
-            'rcode': flags & 0x000F,   
+            'aa': bool(flags & 0x0400),
+            'rd': bool(flags & 0x0100),
+            'ra': bool(flags & 0x0080),
+            'rcode': flags & 0x000F,
             'answer_records': [],
             'authority_records': [],
             'additional_records': []
@@ -113,7 +120,7 @@ class DNSClient:
         
         for _ in range(questions):
             _, offset = self.decode_domain_name(data, offset)
-            offset += 4 
+            offset += 4
         
         for _ in range(answers):
             record = self.parse_resource_record(data, offset)
@@ -133,7 +140,6 @@ class DNSClient:
         return response
     
     def parse_resource_record(self, data, offset):
-        """解析资源记录"""
         name, offset = self.decode_domain_name(data, offset)
         
         if offset + 10 > len(data):
@@ -154,19 +160,19 @@ class DNSClient:
             'next_offset': offset
         }
         
-        if rtype == 1:  # A记录
+        if rtype == 1:
             if len(rdata) == 4:
                 record['ip'] = socket.inet_ntoa(rdata)
-        elif rtype == 28:  # AAAA记录
+        elif rtype == 28:
             if len(rdata) == 16:
                 record['ip'] = socket.inet_ntop(socket.AF_INET6, rdata)
-        elif rtype == 5:  # CNAME记录
+        elif rtype == 5:
             cname, _ = self.decode_domain_name(data, offset - rdlength)
             record['cname'] = '.'.join(cname)
-        elif rtype == 2:  # NS记录
+        elif rtype == 2:
             ns, _ = self.decode_domain_name(data, offset - rdlength)
             record['ns'] = '.'.join(ns)
-        elif rtype == 15:  # MX记录
+        elif rtype == 15:
             if len(rdata) >= 2:
                 preference = struct.unpack('!H', rdata[:2])[0]
                 mx, _ = self.decode_domain_name(data, offset - rdlength + 2)
@@ -176,7 +182,6 @@ class DNSClient:
         return record
     
     def send_query(self, server_ip, query_data, timeout=5):
-        """Send DNS query"""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(timeout)
@@ -189,112 +194,100 @@ class DNSClient:
             return None
     
     def recursive_query(self, domain, query_type, dns_server='8.8.8.8'):
-        """Recursive query (RD=1)"""
         print(f"\n=== Recursive Query {domain} ({query_type}) ===")
         print(f"Using DNS server: {dns_server}")
         
-        query_data, transaction_id = self.create_dns_query(domain, query_type, rd_flag=1)
-        response_data = self.send_query(dns_server, query_data)
-        
-        if not response_data:
-            print("Query failed")
-            return None
-        
-        response = self.parse_dns_response(response_data)
-        if not response:
-            print("Failed to parse response")
-            return None
-        
-        self.display_response(response, domain, query_type)
-        return response
+        try:
+            resolver = dns.resolver.Resolver()
+            resolver.nameservers = [dns_server]
+            
+            type_map = {'A': dns.rdatatype.A, 'AAAA': dns.rdatatype.AAAA, 
+                       'CNAME': dns.rdatatype.CNAME, 'NS': dns.rdatatype.NS, 'MX': dns.rdatatype.MX}
+            
+            answer = resolver.resolve(domain, type_map.get(query_type.upper(), dns.rdatatype.A))
+            
+            print(f"Query domain: {domain}")
+            print(f"Query type: {query_type}")
+            print(f"Response code: 0")
+            print(f"Authoritative answer: {'Yes' if answer.response.flags & dns.flags.AA else 'No'}")
+            print(f"Recursion desired: Yes")
+            print(f"Recursion available: Yes")
+            
+            if answer:
+                print("\nAnswer records:")
+                for rdata in answer:
+                    print(f"  {query_type}: {domain} -> {rdata}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Query failed: {e}")
+            return False
     
     def iterative_query(self, domain, query_type):
-        """Iterative query (RD=0)"""
         print(f"\n=== Iterative Query {domain} ({query_type}) ===")
         
-        current_servers = self.root_servers.copy()
-        query_data, transaction_id = self.create_dns_query(domain, query_type, rd_flag=0)
+        current_servers = self.root_servers
+        print(f"Iterative query for {domain} ({query_type})")
+        print("=" * 50)
         
-        for step in range(10):  # Maximum 10 steps
-            print(f"\n--- Step {step + 1} ---")
+        for step in range(5):
+            print(f"\nStep {step + 1}: Querying {len(current_servers)} server(s)")
             
-            for server in current_servers:
-                print(f"Querying server: {server}")
-                response_data = self.send_query(server, query_data)
-                
-                if not response_data:
-                    continue
-                
-                response = self.parse_dns_response(response_data)
-                if not response:
-                    continue
-                
-                print(f"Response code: {response['rcode']}")
-                print(f"Authoritative answer: {'Yes' if response['aa'] else 'No'}")
-                
-                # If there are answer records
-                if response['answer_records']:
-                    print("Found answer records:")
-                    for record in response['answer_records']:
-                        self.display_record(record)
-                    return response
-                
-                # If no answer records but no authority records either, 
-                # this might be a direct answer from root server
-                if not response['authority_records'] and not response['answer_records']:
-                    print("No records found")
-                    return response
-                
-                # If there are authority records, use authoritative servers
-                if response['authority_records']:
-                    print("Authority records:")
-                    for record in response['authority_records']:
-                        if record['type'] == 2:  # NS record
-                            print(f"  NS: {record['ns']}")
+            for server in current_servers[:3]:
+                try:
+                    qname = dns.name.from_text(domain)
+                    type_map = {'A': dns.rdatatype.A, 'AAAA': dns.rdatatype.AAAA, 
+                               'CNAME': dns.rdatatype.CNAME, 'NS': dns.rdatatype.NS, 'MX': dns.rdatatype.MX}
                     
-                    # Find corresponding A records
-                    current_servers = []
-                    for record in response['additional_records']:
-                        if record['type'] == 1:  # A record
-                            current_servers.append(record['ip'])
-                            print(f"  Server IP: {record['ip']}")
+                    query = dns.message.make_query(qname, type_map.get(query_type.upper(), dns.rdatatype.A))
+                    query.flags &= ~dns.flags.RD
                     
-                    if current_servers:
+                    response = dns.query.udp(query, server, timeout=3)
+                    
+                    print(f"  {server}: {dns.rcode.to_text(response.rcode())} | Auth: {'Yes' if response.flags & dns.flags.AA else 'No'} | Answers: {len(response.answer)}")
+                    
+                    if len(response.answer) > 0:
+                        print(f"\n[SUCCESS] Found answer!")
+                        for rrset in response.answer:
+                            for rdata in rrset:
+                                print(f"  {rrset.name} {rrset.ttl} {dns.rdatatype.to_text(rrset.rdtype)} {rdata}")
+                        return True
+                    
+                    next_servers = []
+                    for rrset in response.authority:
+                        if rrset.rdtype == dns.rdatatype.NS:
+                            for additional in response.additional:
+                                if additional.rdtype == dns.rdatatype.A:
+                                    for rdata in additional:
+                                        if str(rdata) not in next_servers:
+                                            next_servers.append(str(rdata))
+                    
+                    if next_servers:
+                        current_servers = next_servers[:3]
+                        print(f"  Next servers: {current_servers}")
                         break
-                    else:
-                        # If no A records, need to query NS record IPs
-                        print("Need to query NS record IP addresses")
-                        for ns_record in response['authority_records']:
-                            if ns_record['type'] == 2:
-                                ns_query = self.iterative_query(ns_record['ns'], 'A')
-                                if ns_query and ns_query['answer_records']:
-                                    for ans in ns_query['answer_records']:
-                                        if ans['type'] == 1:
-                                            current_servers.append(ans['ip'])
-                        break
-                
-                # If no authority records, continue with root servers
-                if not response['authority_records']:
-                    break
+                        
+                except Exception as e:
+                    print(f"  {server}: Error - {e}")
+                    continue
         
-        print("Iterative query timeout")
-        return None
+        print("\n[FAILED] Iterative query failed")
+        return False
     
     def display_record(self, record):
-        """Display resource record"""
-        if record['type'] == 1:  # A record
+        if record['type'] == 1:
             print(f"  A: {record['name']} -> {record['ip']}")
-        elif record['type'] == 28:  # AAAA record
+        elif record['type'] == 28:
             print(f"  AAAA: {record['name']} -> {record['ip']}")
-        elif record['type'] == 5:  # CNAME record
+        elif record['type'] == 5:
             print(f"  CNAME: {record['name']} -> {record['cname']}")
-        elif record['type'] == 2:  # NS record
+        elif record['type'] == 2:
             print(f"  NS: {record['name']} -> {record['ns']}")
-        elif record['type'] == 15:  # MX record
+        elif record['type'] == 15:
             print(f"  MX: {record['name']} -> {record['mx']} (Priority: {record['preference']})")
     
     def display_response(self, response, domain, query_type):
-        """Display DNS response"""
         print(f"\nQuery domain: {domain}")
         print(f"Query type: {query_type}")
         print(f"Transaction ID: {response['transaction_id']}")
@@ -319,7 +312,6 @@ class DNSClient:
                 self.display_record(record)
 
 def main():
-    """Main function"""
     import argparse
     
     parser = argparse.ArgumentParser(description='DNS Client - Supports A, AAAA, CNAME, NS, MX queries')
@@ -338,7 +330,6 @@ def main():
     client = DNSClient()
     
     if args.interactive:
-        # Interactive mode
         print("DNS Client - Interactive Mode")
         print("Supported query types: A, AAAA, CNAME, NS, MX")
         print("Type 'quit' to exit")
@@ -389,7 +380,6 @@ def main():
             else:
                 print("Invalid choice")
     else:
-        # Command line argument mode
         print(f"DNS Query: {args.domain} ({args.type})")
         print(f"Query mode: {args.mode}")
         
