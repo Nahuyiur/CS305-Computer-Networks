@@ -132,7 +132,6 @@ Corresponding entry:
 
 ```txt
 Host: gaia.cs.umass.edu
-Path: /
 ID=1150
 ```
 
@@ -149,7 +148,7 @@ Cookie: ID=1150
 Status line:
 
 ```txt
-HTTP/1.1 200 OK
+HTTP/1.1 200 OK\r\n
 ```
 
 Entity body includes:
@@ -198,9 +197,9 @@ Therefore, for the whole process, $\text{time needed}=RTT_0+2RTT_1+\frac{L}{R}+1
 
 ### (c)
 
-For persistent HTTP, we only need one $2RTT_1$,
+For persistent HTTP, we only need $3RTT_1$,
 
-Therefore, for the whole process, $\text{time needed}=RTT_0+2RTT_1+\frac{13L}{R}$
+Therefore, for the whole process, $\text{time needed}=RTT_0+3RTT_1+\frac{13L}{R}$
 
 ## Q9
 
