@@ -69,7 +69,9 @@ def run_dig(domain, thread_id, results_list):
         stdout = result.stdout
         if "ANSWER SECTION" in stdout and "status: NOERROR" in stdout:
             result_dict["status"] = "SUCCESS"
-            answer_lines = [line for line in stdout.splitlines() if "\tA\t" in line or "\tCNAME\t" in line]
+            # answer_lines = [line for line in stdout.splitlines() if "\tA\t" in line or "\tCNAME\t" in line]
+            answer_lines = [line for line in stdout.splitlines() 
+                            if "A" in line.replace("\t", " ") or "CNAME" in line.replace("\t", " ")]
             if answer_lines:
                 result_dict["details"] = f"-> {answer_lines[-1].split()[-1]}"
             else:

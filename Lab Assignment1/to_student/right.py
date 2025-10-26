@@ -1,4 +1,3 @@
-from math import exp
 import threading
 import socket
 import time
@@ -6,7 +5,6 @@ import pickle
 from collections import OrderedDict
 from queue import Queue, Empty
 from dnslib import DNSRecord, QTYPE, RR, A, CNAME, DNSHeader, TXT
-from dns import resolver, rdatatype, name as dns_name
 
 
 class CacheManager:
@@ -32,9 +30,8 @@ class CacheManager:
         """
         self.cache_file = cache_file
         self.max_size = max_size
-        self.lock=threading.Lock()
-        loaded=self._load_from_file()
-        self.cache=loaded if isinstance(loaded, OrderedDict) else OrderedDict()
+        self.cache = self._load_from_file()
+        self.lock = threading.Lock()
 
     def _load_from_file(self):
         """
@@ -52,23 +49,17 @@ class CacheManager:
             - collections.OrderedDict: If the file does not exist, is empty, or corrupted, returns a new empty ordered dictionary.
         """
         try:
-            # Load cache data from disk file
             with open(self.cache_file, 'rb') as f:
-                data=pickle.load(f)
-        except (FileNotFoundError, EOFError, pickle.UnpicklingError,OSError):
+                cache_data = pickle.load(f)
+                # Filter out expired entries
+                current_time = time.time()
+                valid_cache = OrderedDict()
+                for key, (record, expiry_time) in cache_data.items():
+                    if expiry_time > current_time:
+                        valid_cache[key] = (record, expiry_time)
+                return valid_cache
+        except (FileNotFoundError, EOFError, pickle.PickleError):
             return OrderedDict()
-
-        # Filter out expired entries based on current time
-        now=time.time()
-        cleaned=OrderedDict()
-        for key,value in (data.items() if isinstance(data, dict) else []):
-            try:
-                record,expires=value
-                if now<float(expires):
-                    cleaned[key]= (record,float(expires))
-            except Exception:
-                continue
-        return cleaned
 
     def save_to_file(self):
         """
@@ -84,11 +75,8 @@ class CacheManager:
             - None: This function does not return a value.
         """
         with self.lock:
-            try:
-                with open(self.cache_file, 'wb') as f:
-                    pickle.dump(self.cache, f,protocol=pickle.HIGHEST_PROTOCOL)
-            except Exception:
-                pass
+            with open(self.cache_file, 'wb') as f:
+                pickle.dump(self.cache, f)
 
     def readCache(self, domain_name, qtype_str):
         """
@@ -108,27 +96,18 @@ class CacheManager:
             - dnslib.DNSRecord: If a valid, unexpired cached record is found, return the record object.
             - None: If no such record exists in the cache or the record has expired, return None.
         """
-        if not domain_name or not qtype_str:
-            return None
-
-        # Create cache key from domain and query type
-        key = f"{domain_name.lower()}.{qtype_str.upper()}"
-        now = time.time()
         with self.lock:
-            item = self.cache.get(key)
-            if not item:
-                return None
-            record, expires = item
-            # Check if record is still valid (not expired)
-            if expires > now:
-                # Update LRU order
-                self.cache.move_to_end(key, last=True)
-                return record
-            try:
-                # Remove expired entry
-                del self.cache[key]
-            except KeyError:
-                pass
+            key = f"{domain_name}:{qtype_str}"
+            if key in self.cache:
+                record, expiry_time = self.cache[key]
+                current_time = time.time()
+                if expiry_time > current_time:
+                    # Move to end (most recently used)
+                    self.cache.move_to_end(key)
+                    return record
+                else:
+                    # Expired, remove from cache
+                    del self.cache[key]
             return None
 
     def writeCache(self, domain_name, qtype_str, response_record):
@@ -149,51 +128,23 @@ class CacheManager:
         :return:
             - None: This function does not return a value.
         """
-        if not domain_name or not qtype_str or not response_record:
-            return
-        # Create cache key from domain and query type
-        key=f"{domain_name.lower()}.{qtype_str.upper()}"
-        now=time.time()
-        
-        def _extract_min_ttl(resp):
-            try:
-                # Handle NXDOMAIN with fixed TTL
-                if resp.header.rcode==3:
-                    return 60
-                ttls=[]
-                # Extract TTL from answer records
-                for rr in resp.rr:
-                    ttls.append(int(getattr(rr,'ttl',0)))
-                
-                # If no TTL in answers, check SOA record
-                if not ttls:
-                    for rr in resp.auth:
-                        if QTYPE.get(rr.rtype)=='SOA':
-                            try:
-                                minimun=int(rr.rdata.times[4])
-                                if minimun>0:
-                                    ttls.append(minimun)
-                            except Exception:
-                                pass
-                m=min(ttls) if ttls else 300
-                return max(m,30)
-            except Exception:
-                return 300
-
-        # Calculate TTL and expiration time
-        ttl=_extract_min_ttl(response_record)
-        expires=now+ttl
         with self.lock:
-            # Implement LRU eviction when cache is full
-            if key not in self.cache and len(self.cache)>=self.max_size:
-                try:
-                    self.cache.popitem(last=False)
-                except Exception:
-                    self.cache.clear()
+            key = f"{domain_name}:{qtype_str}"
+            current_time = time.time()
             
-            # Store record with expiration time
-            self.cache[key]=(response_record,expires)
-            self.cache.move_to_end(key,last=True)
+            # Determine TTL based on response type
+            if response_record.header.rcode == 3:  # NXDOMAIN
+                ttl = 60  # 60 seconds for NXDOMAIN
+            else:
+                ttl = 300  # 300 seconds for normal responses
+            
+            expiry_time = current_time + ttl
+            
+            # Enforce LRU eviction if cache is full
+            if len(self.cache) >= self.max_size and key not in self.cache:
+                self.cache.popitem(last=False)  # Remove least recently used
+            
+            self.cache[key] = (response_record, expiry_time)
 
 
 # --- Add method to ReplyGenerator for generating redirect responses ---
@@ -297,24 +248,17 @@ class DNSServer:
         self.source_port = source_port
         self.ip = ip
         self.port = port
-        # Create UDP socket for DNS communication
+        self.num_workers = num_workers
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-        # Initialize thread-safe queues for multi-threading
-        self.request_queue = Queue(maxsize=1000)
-        self.response_queue = Queue(maxsize=1000)
-        self.stop_event = threading.Event()
-        self.num_workers = num_workers
-
+        # Initialize core components for multi-threading architecture
         self.cache_manager = CacheManager()
-
-        self.receiver_thread=None
-        self.sender_thread=None
-        self.workers=[]
-
-        # Configure socket for better performance
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.settimeout(1.0)
+        self.request_queue = Queue()
+        self.response_queue = Queue()
+        self.workers = []
+        self.receiver_thread = None
+        self.sender_thread = None
+        self.running = False
 
     def start(self):
         """
@@ -323,26 +267,39 @@ class DNSServer:
         This method brings the server into active state, including binding the port, starting all background threads
         (receiver, sender, worker pool), and keeping the main thread waiting for shutdown signals.
         """
-        self.socket.bind((self.ip, 5533))
-        print(f"[DNSServer] listening on {self.ip}:5533")
-
-        self.receiver_thread = threading.Thread(target=self._receive_loop,name="dns_recv",daemon=True)
-        self.sender_thread = threading.Thread(target=self._send_loop,name="dns_send",daemon=True)
-        self.receiver_thread.start()
-        self.sender_thread.start()
-
-        for i in range(self.num_workers if hasattr(self, "num_workers") else 20):
-            worker = DNSHandler(self.source_ip, self.source_port, self.cache_manager, self.request_queue, self.response_queue, worker_id=i)
-            worker.daemon = True
-            self.workers.append(worker)
-            worker.start()
-        
         try:
-            while not self.stop_event.is_set():
-                time.sleep(0.5)
-        except KeyboardInterrupt:
-            print("\n[DNSServer] KeyboardInterrupt, shutting down...")
-        finally:
+            # Bind socket to port
+            self.socket.bind((self.ip, self.port))
+            print(f"DNS Server started on {self.ip}:{self.port}")
+            
+            # Start worker threads
+            for i in range(self.num_workers):
+                worker = DNSHandler(self.source_ip, self.source_port, self.cache_manager, 
+                                  self.request_queue, self.response_queue, i)
+                worker.daemon = True
+                worker.start()
+                self.workers.append(worker)
+            
+            # Start receiver and sender threads
+            self.receiver_thread = threading.Thread(target=self._receive_loop, daemon=True)
+            self.sender_thread = threading.Thread(target=self._send_loop, daemon=True)
+            
+            self.running = True
+            self.receiver_thread.start()
+            self.sender_thread.start()
+            
+            print(f"DNS Server ready with {self.num_workers} workers")
+            
+            # Keep main thread alive
+            try:
+                while self.running:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nShutdown signal received...")
+                self.stop()
+                
+        except Exception as e:
+            print(f"Failed to start DNS server: {e}")
             self.stop()
 
     def stop(self):
@@ -350,61 +307,49 @@ class DNSServer:
         --- Task 1.2 stop method ---
         Gracefully shut down the server and perform necessary cleanup.
         """
-        if self.stop_event.is_set():
-            return
-        self.stop_event.set()
-
-        try:
-            self.socket.close()
-        except Exception:
-            pass
-
-        try:
-            self.response_queue.put_nowait(((self.ip,self.port),b""))
-        except Exception:
-            pass
+        print("Stopping DNS server...")
+        self.running = False
         
-        try:
+        # Close socket
+        if self.socket:
+            self.socket.close()
+        
+        # Save cache to disk
+        if self.cache_manager:
             self.cache_manager.save_to_file()
-        except Exception:
-            pass
-        print("[DNSServer] Stopped.")
+            print("Cache saved to disk")
+        
+        print("DNS server stopped")
 
     def _receive_loop(self):
         """
         --- Task 1.2 Receive Messages ---
         This method runs in a separate "receiver" thread, solely responsible for listening on the network port.
         """
-        while not self.stop_event.is_set():
+        while self.running:
             try:
-                # Receive DNS requests from clients
-                data, address = self.socket.recvfrom(4096)
+                data, address = self.socket.recvfrom(512)
                 self.request_queue.put((data, address))
-            except socket.timeout:
-                continue
-            except OSError:
+            except socket.error as e:
+                if self.running:
+                    print(f"Error receiving data: {e}")
                 break
-            except Exception:
-                continue
 
     def _send_loop(self):
         """
         --- Task 1.2 Send Messages ---
         This method runs in a separate "sender" thread, solely responsible for sending responses.
         """
-        while not self.stop_event.is_set():
+        while self.running:
             try:
-                # Get response from queue and send to client
-                address,payload=self.response_queue.get(timeout=0.5)
-                if not payload:
-                    continue
-                self.socket.sendto(payload, address)
+                address, response_data = self.response_queue.get(timeout=1)
+                self.socket.sendto(response_data, address)
             except Empty:
                 continue
-            except OSError:
+            except socket.error as e:
+                if self.running:
+                    print(f"Error sending data: {e}")
                 break
-            except Exception:
-                continue
 
 
 class DNSHandler(threading.Thread):
@@ -485,11 +430,9 @@ class DNSHandler(threading.Thread):
     def handle(self, message):
         """Handle a single DNS query, incorporating filtering and redirection logic."""
         try:
-            # Parse incoming DNS request
             income_record = DNSRecord.parse(message)
             domain_name = str(income_record.q.qname).strip('.')
-            qtype_str = QTYPE.get(income_record.q.qtype)
-
+            qtype_str = QTYPE[income_record.q.qtype]
 
             # ==============================================================================
             # --- Task 3.2 DNS Redirection Logic ---
@@ -519,18 +462,23 @@ class DNSHandler(threading.Thread):
             # If the domain is neither filtered nor redirected, proceed with standard resolution.
             # This follows the strategy: "check cache first, then perform network query".
             # ==============================================================================
-            # Check cache first for performance
-            cached = self.cache_manager.readCache(domain_name, qtype_str)
-            if cached:
-                cached.header.id = income_record.header.id
-                return cached
-
-            # Perform iterative DNS query if not in cache
-            rr_list = self.query(domain_name, QTYPE.get(income_record.q.qtype) or "A")
-
+            # Check cache first
+            cached_response = self.cache_manager.readCache(domain_name, qtype_str)
+            if cached_response:
+                # Update the cached response with current request ID
+                cached_response.header.id = income_record.header.id
+                return cached_response
+            
+            # Cache miss, perform iterative query
+            rr_list = self.query(domain_name, income_record.q.qtype)
             if rr_list:
-                return ReplyGenerator.myReply(income_record, rr_list)
+                # Create response with found records
+                response = ReplyGenerator.myReply(income_record, rr_list)
+                # Cache the response
+                self.cache_manager.writeCache(domain_name, qtype_str, response)
+                return response
             else:
+                # Domain not found
                 return ReplyGenerator.replyForNotFound(income_record)
 
             # --- Task 1.3 END ---
@@ -556,107 +504,116 @@ class DNSHandler(threading.Thread):
                     This list may include CNAME and final A records.
             - None: On failure (due to non-existent domain, timeout, or error), returns None.
         """
-        # Start from root server
-        current_server_ip = self.root_server_cache
-        if not current_server_ip:
-            current_server_ip, _ = self.queryRoot(self.source_ip, self.source_port)
-
-        collected_rrs = []  
-        qname = query_name
-
-        # Iterate through DNS hierarchy (max 20 hops)
-        for _ in range(20):  
-            qtype_name = qtype if isinstance(qtype, str) else (QTYPE.get(qtype) or "A")
-            q = DNSRecord.question(qname, qtype_name)
-            # Set RD flag to 0 for iterative query
-            q.header.rd = 0
-
+        try:
+            current_server = self.root_server_cache
+            query_domain = query_name
+            
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(2.0)
-            try:
+            sock.settimeout(10)
+            sock.bind((self.source_ip, self.source_port))
+            
+            max_iterations = 10
+            iteration = 0
+            
+            while iteration < max_iterations:
+                iteration += 1
+                print(f"Iteration {iteration}: Querying {query_domain} from {current_server}")
+                
+                # Create DNS query
+                dns_query = DNSRecord.question(query_domain, "A")
+                dns_query.header.rd = 0  # Set RD flag to 0 for iterative query
+                
                 # Send query to current server
-                sock.sendto(q.pack(), (current_server_ip, 53))
-                data, _ = sock.recvfrom(4096)
-            except Exception:
-                try:
-                    current_server_ip, _ = self.queryRoot(self.source_ip, self.source_port)
-                    continue
-                except Exception:
+                sock.sendto(dns_query.pack(), (current_server, 53))
+                
+                # Receive response
+                data, _ = sock.recvfrom(512)
+                response = DNSRecord.parse(data)
+                
+                print(f"Response RCODE: {response.header.rcode}")
+                
+                # Check for NXDOMAIN
+                if response.header.rcode == 3:
+                    sock.close()
                     return None
-            finally:
-                sock.close()
-
-            resp = DNSRecord.parse(data)
-
-            # Check for NXDOMAIN
-            if resp.header.rcode == 3:
-                return None
-
-            answers = resp.rr
-            auth = resp.auth
-            addi = resp.ar
-
-            # If we got answers, handle CNAME chains
-            if answers:
-                cname_switched = False
-                for rr in answers:
-                    rtype = QTYPE.get(rr.rtype)
-                    if rtype == "CNAME":
-                        collected_rrs.append(rr)
-                        qname = str(rr.rdata.label).rstrip(".")
-                        cname_switched = True
-                if cname_switched:
-                    continue
-
-                final_rrs = collected_rrs + answers
-                return final_rrs
-
-            # Extract NS records from authority section
-            next_ip = None
-            ns_names = []
-            for rr in auth:
-                if QTYPE.get(rr.rtype) == "NS":
-                    ns_names.append(str(rr.rdata.label).rstrip("."))
-
-            # Build glue record map from additional section
-            glue_map = {}
-            for rr in addi:
-                rtype = QTYPE.get(rr.rtype)
-                if rtype in ("A", "AAAA"):
-                    glue_map[str(rr.rname).rstrip(".")] = rr
-
-            # Find next server IP from glue records
-            for ns in ns_names:
-                if ns in glue_map:
-                    rr = glue_map[ns]
-                    if QTYPE.get(rr.rtype) == "A":
-                        next_ip = str(rr.rdata)
+                
+                # Check if we got an answer
+                if response.rr:
+                    print(f"Found answer: {len(response.rr)} records")
+                    sock.close()
+                    return list(response.rr)
+                
+                # Check for CNAME records to follow
+                for rr in response.rr:
+                    if rr.rtype == QTYPE.CNAME:
+                        query_domain = str(rr.rdata).strip('.')
+                        print(f"Following CNAME: {query_domain}")
                         break
+                else:
+                    # --- ✨ 修正重点 1: 从 authority 段提取 NS 域名 ---
+                    ns_names = []
+                    for rr in response.auth:
+                        if rr.rtype == QTYPE.NS:
+                            ns_name = str(rr.rdata).strip('.')
+                            ns_names.append(ns_name)
+                            print(f"Found NS record: {ns_name}")
 
-            # If no glue record, resolve NS name separately
-            if not next_ip and ns_names:
-                res = resolver.Resolver(configure=True)
-                res.lifetime = 2.0
-                res.timeout = 2.0
-                res.nameservers = ['223.5.5.5', '119.29.29.29', '8.8.8.8', '1.1.1.1']
-                for ns in ns_names:
-                    try:
-                        ans = res.resolve(ns, rdatatype.A, raise_on_no_answer=True)
-                        next_ip = ans[0].address
-                        break
-                    except Exception:
-                        continue
+                    # --- ✨ 修正重点 2: 从 additional 段提取对应的 IP ---
+                    ns_servers = []
+                    for rr in response.ar:
+                        if rr.rtype == QTYPE.A:
+                            ns_ip = str(rr.rdata)
+                            ns_servers.append(ns_ip)
+                            print(f"Found NS IP in additional section: {ns_ip}")
 
-            if not next_ip:
-                try:
-                    current_server_ip, _ = self.queryRoot(self.source_ip, self.source_port)
-                    continue
-                except Exception:
-                    return None
+                    # --- ✨ 修正重点 3: 若 additional 没有 IP，则单独解析 NS 域名 ---
+                    if not ns_servers and ns_names:
+                        for ns_name in ns_names:
+                            try:
+                                a_query = DNSRecord.question(ns_name, "A")
+                                a_query.header.rd = 0
+                                # ⚠️ 改为向 root 服务器查询，而非 current_server
+                                sock.sendto(a_query.pack(), (self.root_server_cache, 53))
+                                a_data, _ = sock.recvfrom(512)
+                                a_response = DNSRecord.parse(a_data)
+                                for a_rr in a_response.rr:
+                                    if a_rr.rtype == QTYPE.A:
+                                        ns_ip = str(a_rr.rdata)
+                                        ns_servers.append(ns_ip)
+                                        print(f"Resolved NS {ns_name} -> {ns_ip}")
+                                        break
+                            except Exception as e:
+                                print(f"Failed to resolve NS {ns_name}: {e}")
+                                continue
 
-            current_server_ip = next_ip
+                    # --- ✨ 修正重点 4: 更新 current_server，进入下一级迭代 ---
+                    if ns_servers:
+                        current_server = ns_servers[0]
+                        print(f"Next server: {current_server}")
+                    else:
+                        # No NS servers found, try to go up one level
+                        if query_domain == '.':
+                            sock.close()
+                            return None
+                        else:
+                            parts = query_domain.split('.')
+                            if len(parts) > 1:
+                                query_domain = '.'.join(parts[1:])
+                                print(f"Going up one level: {query_domain}")
+                            else:
+                                query_domain = '.'
+                                print("Reached root, stopping")
+                                sock.close()
+                                return None
+            
+            sock.close()
+            print(f"Max iterations reached for {query_name}")
+            return None
+            
+        except Exception as e:
+            print(f"Query failed for {query_name}: {e}")
+            return None
 
-        return None
 
     def queryRoot(self, source_ip, source_port):
         """
@@ -678,26 +635,62 @@ class DNSHandler(threading.Thread):
 
         :raises Exception: If none of the preset public DNS servers can return a root server IP.
         """
-        # Configure resolver with timeout settings
-        res=resolver.Resolver(configure=True)
-        res.lifetime=2
-        res.timeout=2
-
-        # Try each bootstrap DNS server
-        bootstrap=getattr(self, "BOOTSTRAP_DNS_SERVERS", ['223.5.5.5', '119.29.29.29', '8.8.8.8', '1.1.1.1'])
-        for dns_ip in bootstrap:
+        # Create a query for root servers
+        query = DNSRecord.question(".")
+        query.header.rd = 0  # Set RD flag to 0 for iterative query
+        
+        for dns_server in self.BOOTSTRAP_DNS_SERVERS:
             try:
-                res.nameservers=[dns_ip]
-                # Query for root NS records
-                ans=res.resolve(dns_name.from_text('.'), rdatatype.NS,raise_on_no_answer=True)
-                ns_name=str(ans.rrset[0].target).rstrip('.')
-                # Resolve NS name to get IP address
-                a_ans=res.resolve(ns_name, rdatatype.A,raise_on_no_answer=True)
-                root_ip=a_ans.rrset[0].address
-                return (root_ip, ns_name)
-            except Exception:
+                # Create socket for query
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.settimeout(5)
+                
+                # Bind to source IP and port
+                sock.bind((source_ip, source_port))
+                
+                # Send query
+                sock.sendto(query.pack(), (dns_server, 53))
+                
+                # Receive response
+                data, _ = sock.recvfrom(512)
+                sock.close()
+                
+                # Parse response
+                response = DNSRecord.parse(data)
+                
+                # Look for NS records in authority section
+                for rr in response.auth:
+                    if rr.rtype == QTYPE.NS:
+                        # Found a root server name, now get its IP
+                        root_ns_name = str(rr.rdata).strip('.')
+                        
+                        # Query for A record of the root server
+                        a_query = DNSRecord.question(root_ns_name, "A")
+                        a_query.header.rd = 0
+                        
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        sock.settimeout(5)
+                        sock.bind((source_ip, source_port))
+                        sock.sendto(a_query.pack(), (dns_server, 53))
+                        
+                        a_data, _ = sock.recvfrom(512)
+                        sock.close()
+                        
+                        a_response = DNSRecord.parse(a_data)
+                        
+                        # Extract IP from A record
+                        for a_rr in a_response.rr:
+                            if a_rr.rtype == QTYPE.A:
+                                root_ip = str(a_rr.rdata)
+                                return root_ip, root_ns_name
+                                
+            except Exception as e:
+                print(f"Failed to query {dns_server}: {e}")
                 continue
-        raise Exception("Cannot discover root server from bootstrap resolvers.")
+        
+        # If all bootstrap servers fail, return a known root server
+        return '198.41.0.4', 'a.root-servers.net'
+
 
 def get_local_ip():
     """
@@ -711,14 +704,22 @@ def get_local_ip():
         - str: On failure (e.g., no network, firewall), returns a robust fallback '0.0.0.0'.
     """
     try:
-        # Connect to server to determine outbound interface
-        test_sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        test_sock.connect(('8.8.8.8', 80))
-        ip=test_sock.getsockname()[0]
-        test_sock.close()
-        return ip
-    except Exception:   
-        return '0.0.0.0'
+        # Create a temporary socket to determine the outbound interface
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            # Connect to a remote address (doesn't actually send data)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            return local_ip
+    except Exception:
+        # Fallback: try to get localhost IP
+        try:
+            hostname = socket.gethostname()
+            local_ip = socket.gethostbyname(hostname)
+            if local_ip.startswith('127.'):
+                return '0.0.0.0'  # Avoid loopback
+            return local_ip
+        except Exception:
+            return '0.0.0.0'  # Ultimate fallback
 
 
 if __name__ == '__main__':
