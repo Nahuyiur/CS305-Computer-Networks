@@ -26,6 +26,72 @@ DOMAINS_TO_TEST = [
     "ads.annoying-tracker.com"
 ]
 
+# DOMAINS_TO_TEST = [
+#     # ==============================================================================
+#     # --- Category 1: Normal Resolution Test Cases (A Records & CNAME Chains) ---
+#     # ==============================================================================
+    
+#     # 1.1 Major domestic tech giants with CNAME and CDN
+#     "www.baidu.com",           # Baidu - complex CNAME chain, CDN
+#     "www.taobao.com",          # Taobao - e-commerce platform with CDN
+#     "www.bilibili.com",        # Bilibili - video platform with complex CDN
+#     "www.sina.com.cn",         # Sina - news portal with stable resolution
+    
+#     # 1.2 Educational institutions (typically simple A records)
+#     "www.tsinghua.edu.cn",     # Tsinghua University - simple A record
+#     "www.pku.edu.cn",          # Peking University - educational domain
+#     "www.fudan.edu.cn",        # Fudan University - another educational domain
+    
+#     # 1.3 International domains for global resolution testing
+#     "www.github.com",          # GitHub - international tech platform
+#     "www.stackoverflow.com",   # Stack Overflow - developer community
+#     "www.wikipedia.org",       # Wikipedia - global knowledge base
+    
+#     # ==============================================================================
+#     # --- Category 2: DNS Redirection Test Cases (from redirect_map) ---
+#     # ==============================================================================
+    
+#     # 2.1 Google services redirection (redirected to 127.0.0.1)
+#     "www.google.com",          # Main Google search - should redirect to 127.0.0.1
+#     "google.com",              # Google root domain - should redirect to 127.0.0.1
+    
+#     # 2.2 Ad tracking services redirection (redirected to 0.0.0.0)
+#     "www.google-analytics.com", # Google Analytics - should redirect to 0.0.0.0
+#     "doubleclick.net",         # DoubleClick ads - should redirect to 0.0.0.0
+    
+#     # 2.3 Friendly redirection test
+#     "friendly.name",           # Custom friendly domain - should redirect to 8.8.8.8
+    
+#     # ==============================================================================
+#     # --- Category 3: DNS Filtering Test Cases (from blocklist) ---
+#     # ==============================================================================
+    
+#     # 3.1 Malware and phishing domains (blocked)
+#     "malware-site.com",        # Malware domain - should be blocked
+#     "phishing-attack.net",     # Phishing domain - should be blocked
+    
+#     # 3.2 Ad and tracking domains (blocked)
+#     "ads.annoying-tracker.com", # Ad tracker - should be blocked
+#     "stats.unwanted-data-miner.org", # Data mining tracker - should be blocked
+    
+#     # 3.3 Distracting content domains (blocked)
+#     "distracting-social-media.com", # Social media distraction - should be blocked
+    
+#     # ==============================================================================
+#     # --- Category 4: Edge Cases and Error Testing ---
+#     # ==============================================================================
+    
+#     # 4.1 Non-existent domains (should return NXDOMAIN)
+#     "nonexistent-domain-12345.com", # Non-existent domain
+#     "this-domain-does-not-exist.net", # Another non-existent domain
+    
+#     # 4.2 Subdomain testing (not in redirect rules)
+#     "mail.google.com",         # Google mail subdomain (not in redirect rules)
+#     "drive.google.com",        # Google Drive subdomain (not in redirect rules)
+#     "maps.google.com",         # Google Maps subdomain (not in redirect rules)
+    
+# ]
+
 SERVER_IP = "127.0.0.1"
 SERVER_PORT = 5533
 

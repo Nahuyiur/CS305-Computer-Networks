@@ -111,8 +111,8 @@ class CacheManager:
         if not domain_name or not qtype_str:
             return None
 
-        # Create cache key from domain and query type
-        key = f"{domain_name.lower()}.{qtype_str.upper()}"
+        # Create cache key from domain and query type 
+        key = f"{domain_name.lower()}:{qtype_str.upper()}"
         now = time.time()
         with self.lock:
             item = self.cache.get(key)
@@ -151,49 +151,26 @@ class CacheManager:
         """
         if not domain_name or not qtype_str or not response_record:
             return
-        # Create cache key from domain and query type
-        key=f"{domain_name.lower()}.{qtype_str.upper()}"
-        now=time.time()
         
-        def _extract_min_ttl(resp):
-            try:
-                # Handle NXDOMAIN with fixed TTL
-                if resp.header.rcode==3:
-                    return 60
-                ttls=[]
-                # Extract TTL from answer records
-                for rr in resp.rr:
-                    ttls.append(int(getattr(rr,'ttl',0)))
-                
-                # If no TTL in answers, check SOA record
-                if not ttls:
-                    for rr in resp.auth:
-                        if QTYPE.get(rr.rtype)=='SOA':
-                            try:
-                                minimun=int(rr.rdata.times[4])
-                                if minimun>0:
-                                    ttls.append(minimun)
-                            except Exception:
-                                pass
-                m=min(ttls) if ttls else 300
-                return max(m,30)
-            except Exception:
-                return 300
-
-        # Calculate TTL and expiration time
-        ttl=_extract_min_ttl(response_record)
-        expires=now+ttl
+        # Create cache key from domain and query type
+        key = f"{domain_name.lower()}:{qtype_str.upper()}"
+        now = time.time()
+        
+        # Determine TTL based on response type
+        if response_record.header.rcode == 3:  # NXDOMAIN
+            ttl = 60  # 60 seconds for NXDOMAIN
+        else:
+            ttl = 300  # 300 seconds for normal responses
+        
+        expires = now + ttl
+        
         with self.lock:
-            # Implement LRU eviction when cache is full
-            if key not in self.cache and len(self.cache)>=self.max_size:
-                try:
-                    self.cache.popitem(last=False)
-                except Exception:
-                    self.cache.clear()
+            # Enforce LRU eviction if cache is full
+            if len(self.cache) >= self.max_size and key not in self.cache:
+                self.cache.popitem(last=False)  # Remove least recently used
             
             # Store record with expiration time
-            self.cache[key]=(response_record,expires)
-            self.cache.move_to_end(key,last=True)
+            self.cache[key] = (response_record, expires)
 
 
 # --- Add method to ReplyGenerator for generating redirect responses ---
@@ -498,7 +475,10 @@ class DNSHandler(threading.Thread):
             # ==============================================================================
             if domain_name in self.redirect_map:
                 redirect_ip = self.redirect_map[domain_name]
-                return ReplyGenerator.replyForRedirect(income_record, redirect_ip)
+                response = ReplyGenerator.replyForRedirect(income_record, redirect_ip)
+                # Cache the redirect response
+                self.cache_manager.writeCache(domain_name, qtype_str, response)
+                return response
 
             # --- Task 3.2 END ---
             # ==============================================================================
@@ -509,7 +489,10 @@ class DNSHandler(threading.Thread):
             # If the domain is in our blacklist, we immediately return a "does not exist" response.
             # ==============================================================================
             if domain_name in self.blocklist:
-                return ReplyGenerator.replyForBlocked(income_record)
+                response = ReplyGenerator.replyForBlocked(income_record)
+                # Cache the blocked response
+                self.cache_manager.writeCache(domain_name, qtype_str, response)
+                return response
 
             # --- Task 3.3 END ---
             # ==============================================================================
@@ -529,9 +512,16 @@ class DNSHandler(threading.Thread):
             rr_list = self.query(domain_name, QTYPE.get(income_record.q.qtype) or "A")
 
             if rr_list:
-                return ReplyGenerator.myReply(income_record, rr_list)
+                # Create response with found records
+                response = ReplyGenerator.myReply(income_record, rr_list)
+                # Cache the response
+                self.cache_manager.writeCache(domain_name, qtype_str, response)
+                return response
             else:
-                return ReplyGenerator.replyForNotFound(income_record)
+                # Domain not found, cache NXDOMAIN response
+                nxdomain_response = ReplyGenerator.replyForNotFound(income_record)
+                self.cache_manager.writeCache(domain_name, qtype_str, nxdomain_response)
+                return nxdomain_response
 
             # --- Task 1.3 END ---
             # ==============================================================================

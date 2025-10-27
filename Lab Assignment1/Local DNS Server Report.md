@@ -1,7 +1,7 @@
 # Local DNS Server Report
 Name: Rui Yuhan, Student ID: 12310520
 ## Code Implementation
-### Task1: Iterative Query
+### Task 1: Iterative Query
 1.1 IP address detection
 ```
 def get_local_ip():
@@ -127,13 +127,20 @@ class DNSHandler(threading.Thread):
         rr_list = self.query(domain_name, QTYPE.get(income_record.q.qtype) or "A")
 
         if rr_list:
-            return ReplyGenerator.myReply(income_record, rr_list)
+            # Create response with found records
+            response = ReplyGenerator.myReply(income_record, rr_list)
+            # Cache the response
+            self.cache_manager.writeCache(domain_name, qtype_str, response)
+            return response
         else:
-            return ReplyGenerator.replyForNotFound(income_record)
+            # Domain not found, cache NXDOMAIN response
+            nxdomain_response = ReplyGenerator.replyForNotFound(income_record)
+            self.cache_manager.writeCache(domain_name, qtype_str, nxdomain_response)
+            return nxdomain_response
 
 ```
 **Explanation**:
-Parses DNS requests, checks cache first, performs iterative queries if needed, and generates appropriate responses (success/NXDOMAIN/error) with matching request IDs.
+Parses DNS requests, checks cache first, performs iterative queries if needed, writes successful responses and NXDOMAIN responses to cache, and generates appropriate responses with matching request IDs.
 
 ---
 
@@ -332,7 +339,7 @@ def readCache(self, domain_name, qtype_str):
         return None
 
     # Create cache key from domain and query type
-    key = f"{domain_name.lower()}.{qtype_str.upper()}"
+    key = f"{domain_name.lower()}:{qtype_str.upper()}"
     now = time.time()
     with self.lock:
         item = self.cache.get(key)
@@ -352,7 +359,7 @@ def readCache(self, domain_name, qtype_str):
         return None
 ```
 **Explanation**:
-Creates cache key by combining domain name and query type, then checks if the cached record exists and is still valid by comparing current time with expiration timestamp. If valid, updates LRU order and returns the record; if expired, removes the entry from cache and returns None to trigger a new network query.
+Creates cache key by combining domain name and query type with colon separator, then checks if the cached record exists and is still valid by comparing current time with expiration timestamp. If valid, updates LRU order and returns the record; if expired, removes the entry from cache and returns None to trigger a new network query.
 
 ---
 
@@ -361,51 +368,29 @@ Creates cache key by combining domain name and query type, then checks if the ca
 def writeCache(self, domain_name, qtype_str, response_record):
     if not domain_name or not qtype_str or not response_record:
         return
-    # Create cache key from domain and query type
-    key=f"{domain_name.lower()}.{qtype_str.upper()}"
-    now=time.time()
     
-    def _extract_min_ttl(resp):
-        try:
-            # Handle NXDOMAIN with fixed TTL
-            if resp.header.rcode==3:
-                return 60
-            ttls=[]
-            # Extract TTL from answer records
-            for rr in resp.rr:
-                ttls.append(int(getattr(rr,'ttl',0)))
-            
-            # If no TTL in answers, check SOA record
-            if not ttls:
-                for rr in resp.auth:
-                    if QTYPE.get(rr.rtype)=='SOA':
-                        try:
-                            minimun=int(rr.rdata.times[4])
-                            if minimun>0:
-                                ttls.append(minimun)
-                        except Exception:
-                            pass
-            m=min(ttls) if ttls else 300
-            return max(m,30)
-        except Exception:
-            return 300
-
-    # Calculate TTL and expiration time
-    ttl=_extract_min_ttl(response_record)
-    expires=now+ttl
+    # Create cache key from domain and query type
+    key = f"{domain_name.lower()}:{qtype_str.upper()}"
+    now = time.time()
+    
+    # Determine TTL based on response type
+    if response_record.header.rcode == 3:  # NXDOMAIN
+        ttl = 60  # 60 seconds for NXDOMAIN
+    else:
+        ttl = 300  # 300 seconds for normal responses
+    
+    expires = now + ttl
+    
     with self.lock:
-        if key not in self.cache and len(self.cache)>=self.max_size:
-            try:
-                self.cache.popitem(last=False)
-            except Exception:
-                self.cache.clear()
+        # Enforce LRU eviction if cache is full
+        if len(self.cache) >= self.max_size and key not in self.cache:
+            self.cache.popitem(last=False)  # Remove least recently used
         
         # Store record with expiration time
-        self.cache[key]=(response_record,expires)
-        self.cache.move_to_end(key,last=True)
+        self.cache[key] = (response_record, expires)
 ```
 **Explanation**:
-Extracts minimum TTL from DNS response records (handles NXDOMAIN with fixed 60s TTL), calculates expiration time by adding TTL to current time, implements LRU eviction when cache reaches maximum size, and stores the record with expiration timestamp using domain+querytype as the cache key.
+Determines TTL based on response type (NXDOMAIN gets 60s, normal responses get 300s), calculates expiration time by adding TTL to current time, implements LRU eviction when cache reaches maximum size, and stores the record with expiration timestamp using domain:querytype as the cache key.
 
 ---
 
@@ -433,10 +418,13 @@ def replyForRedirect(income_record, redirect_ip, ttl=300):
 # In DNSHandler.handle():
 if domain_name in self.redirect_map:
     redirect_ip = self.redirect_map[domain_name]
-    return ReplyGenerator.replyForRedirect(income_record, redirect_ip)
+    response = ReplyGenerator.replyForRedirect(income_record, redirect_ip)
+    # Cache the redirect response
+    self.cache_manager.writeCache(domain_name, qtype_str, response)
+    return response
 ```
 **Explanation**:
-Creates custom DNS responses with forged A records pointing to redirect IPs, checks domain against redirect_map, and returns responses with specified TTL.
+Creates custom DNS responses with forged A records pointing to redirect IPs, checks domain against redirect_map, caches the redirect response for better performance, and returns responses with specified TTL.
 
 ---
 
@@ -456,12 +444,110 @@ def replyForBlocked(income_record, reason="Blocked due to security policy"):
 
 # In DNSHandler.handle():
 if domain_name in self.blocklist:
-    return ReplyGenerator.replyForBlocked(income_record)
+    response = ReplyGenerator.replyForBlocked(income_record)
+    # Cache the blocked response
+    self.cache_manager.writeCache(domain_name, qtype_str, response)
+    return response
 ```
 **Explanation**:
-Generates REFUSED responses (RCODE=5) for blocked domains, includes TXT records with blocking reason, and checks domain against blocklist before normal resolution.
+Generates REFUSED responses (RCODE=5) for blocked domains, includes TXT records with blocking reason, caches the blocked response to avoid repeated checks, and checks domain against blocklist before normal resolution.
 
 ---
 
 ## Results
-### Task 1:Iterative Query
+### Task 1: Iterative Query
+
+<figure>
+  <img src="images/test_result.png" alt="DNS Server Test Results" width="600">
+  <figcaption><b>Figure 1.</b> DNS Server Test Results</figcaption>
+</figure>
+
+**Test Results**: Successfully tested the iterative query functionality of the local DNS server with 20 concurrent threads querying 7 different domains, verifying proper handling of A records and CNAME records resolution along with multi-threaded concurrent processing capabilities.
+
+<figure>
+  <img src="images/baidu_test.png" alt="Baidu Domain Resolution Test" width="600">
+  <figcaption><b>Figure 2.</b> Baidu Domain Resolution Test</figcaption>
+</figure>
+
+**Baidu Test Results**: Detailed testing of www.baidu.com domain resolution showing successful A record and CNAME chain resolution through the iterative DNS query process.
+
+<figure>
+  <img src="images/1.png" alt="Iterative Query Step 1" width="600">
+  <figcaption><b>Figure 3.</b> Iterative Query Step 1 - Query Root Server</figcaption>
+</figure>
+
+**Step 1**: Query the root DNS server to obtain the authoritative name servers for .com TLD, receiving NS records in the Authority section and corresponding IP addresses (glue records) in the Additional section, initiating the iterative resolution process.
+
+<figure>
+  <img src="images/2.png" alt="Iterative Query Step 2" width="600">
+  <figcaption><b>Figure 4.</b> Iterative Query Step 2 - Query .com TLD Server</figcaption>
+</figure>
+
+**Step 2**: Query the .com TLD server to obtain the authoritative name servers for baidu.com domain, receiving baidu.com NS records in the Authority section and their corresponding IP addresses in the Additional section.
+
+<figure>
+  <img src="images/3.png" alt="Iterative Query Step 3" width="600">
+  <figcaption><b>Figure 5.</b> Iterative Query Step 3 - Query baidu.com Server, Receive CNAME</figcaption>
+</figure>
+
+**Step 3**: Query baidu.com's authoritative server for www.baidu.com and receive CNAME record in the Answer section, showing www.baidu.com points to www.a.shifen.com, requiring further resolution.
+
+<figure>
+  <img src="images/4.png" alt="Iterative Query Step 4" width="600">
+  <figcaption><b>Figure 6.</b> Iterative Query Step 4 - Resolve CNAME to Final IP</figcaption>
+</figure>
+
+**Step 4**: Follow the CNAME chain and query for www.a.shifen.com to obtain the final A records with IP addresses in the Answer section, completing the entire iterative DNS resolution process and returning the result to the client.
+
+### Task 2: Caching
+
+<figure>
+  <img src="images/before_cache.png" alt="DNS Cache Performance Test - Before Cache" width="600">
+  <figcaption><b>Figure 7.</b> DNS Cache Performance Test - Before Cache (Cache Miss)</figcaption>
+</figure>
+
+**Cache Miss Performance**: First query to www.baidu.com showing cache miss scenario with query time of 281 msec, demonstrating the full iterative DNS resolution process including CNAME chain resolution.
+
+<figure>
+  <img src="images/cache_hit.png" alt="DNS Cache Performance Test - Cache Hit" width="600">
+  <figcaption><b>Figure 8.</b> DNS Cache Performance Test - Cache Hit</figcaption>
+</figure>
+
+**Cache Hit Performance**: Subsequent queries to www.baidu.com showing cache hit scenario with query time of 0 msec, demonstrating the dramatic performance improvement achieved through caching. The response time improvement from 281ms to 0ms represents an infinite speedup, proving the effectiveness of the caching mechanism.
+
+### Task 3: Optional Functionalities
+
+<figure>
+  <img src="images/redirect_list.png" alt="DNS Redirection Configuration" width="600">
+  <figcaption><b>Figure 9.</b> DNS Redirection Configuration</figcaption>
+</figure>
+
+**Redirection Test Results**: Successfully tested DNS redirection functionality with 5 different domains, verifying that Google services redirect to 127.0.0.1, ad tracking services redirect to 0.0.0.0, and friendly domains redirect to 8.8.8.8 as configured in the redirect_map.
+
+<figure>
+  <img src="images/redirect_result.png" alt="DNS Redirection Test Results" width="600">
+  <figcaption><b>Figure 10.</b> DNS Redirection Test Results</figcaption>
+</figure>
+
+**Redirection Performance**: All redirection queries completed successfully with fast response times (0.01-0.02s), demonstrating efficient redirection rule processing and custom DNS response generation.
+
+<figure>
+  <img src="images/block_list.png" alt="DNS Filtering Configuration" width="600">
+  <figcaption><b>Figure 11.</b> DNS Filtering Configuration</figcaption>
+</figure>
+
+**Filtering Test Results**: Successfully tested DNS filtering functionality with 5 different malicious and unwanted domains, verifying that all blocked domains return REFUSED status (RCODE=5) as configured in the blocklist.
+
+<figure>
+  <img src="images/block_result.png" alt="DNS Filtering Test Results" width="600">
+  <figcaption><b>Figure 12.</b> DNS Filtering Test Results</figcaption>
+</figure>
+
+**Filtering Performance**: All filtering queries completed with REFUSED responses in 0.01-0.02s, demonstrating effective domain blocking and security policy enforcement.
+
+<figure>
+  <img src="images/performance_result.png" alt="DNS Server Performance Test" width="600">
+  <figcaption><b>Figure 13.</b> DNS Server Comprehensive Performance Test</figcaption>
+</figure>
+
+**Performance Test Results**: Comprehensive performance testing with 25 concurrent queries completed in 0.87 seconds, demonstrating excellent multi-threading capabilities and efficient request processing across normal resolution, redirection, and filtering operations. The server achieved sub-second response times, indicating robust performance under concurrent load.
