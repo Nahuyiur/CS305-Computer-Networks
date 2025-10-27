@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Danmaku</title>
+</head>
+<body>
+  <h3>Danmaku System</h3>
+  <div>Status: <span id="status">Connecting...</span></div>
+  <hr>
+  <div>
+    <input id="msg" placeholder="Enter message..." size="50" />
+    <button id="send">Send</button>
+  </div>
+  <hr>
+  <h4>Messages:</h4>
+  <ul id="messages"></ul>
+
+  <script>
+    const ws = new WebSocket("ws://127.0.0.1:8765");
+    const msgInput = document.getElementById('msg');
+    const sendBtn = document.getElementById('send');
+    const status = document.getElementById('status');
+    const messagesList = document.getElementById('messages');
+
+    function addMessage(text) {
+      const li = document.createElement('li');
+      li.textContent = text;
+      messagesList.appendChild(li);
+    }
+
+    ws.onopen = () => {
+      status.textContent = 'Connected';
+      sendBtn.disabled = false;
+    };
+
+    ws.onmessage = e => {
+      addMessage(e.data);
+    };
+
+    ws.onclose = () => {
+      status.textContent = 'Disconnected';
+      sendBtn.disabled = true;
+    };
+
+    ws.onerror = () => {
+      status.textContent = 'Error';
+    };
+
+    function sendMessage() {
+      const v = msgInput.value.trim();
+      if (v && ws.readyState === WebSocket.OPEN) {
+        ws.send(v);
+        msgInput.value = '';
+      }
+    }
+
+    sendBtn.onclick = sendMessage;
+
+    msgInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        sendMessage();
+      }
+    });
+  </script>
+</body>
+</html>
