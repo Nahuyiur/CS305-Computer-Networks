@@ -10,13 +10,27 @@ curl -I http://www.sina.com.cn
 
 X-Via-CDN字段表明使用CDN
 
+
+
+查询sina的ip用以下命令：
+
+![image-20251029175537479](/Users/ruiyuhan/Library/Application Support/typora-user-images/image-20251029175537479.png)
+
+sina的ip如图所示
+
+
+
+查询cdn用以下命令：
+
 ```bash
-nslookup www.sina.com.cn
+curl -v http://www.sina.com.cn 2>&1 grep "Connected to"
 ```
 
-<img src="/Users/ruiyuhan/Library/Application Support/typora-user-images/image-20251027155700610.png" alt="image-20251027155700610" style="zoom:50%;" />
+![image-20251029175130213](/Users/ruiyuhan/Library/Application Support/typora-user-images/image-20251029175130213.png)
 
-CDN的地址如图所示
+CDN的地址：240e:97c:38:600:3::3e8
+
+
 
 不同的地方可能得到不同的ip：124.239.198.145, 122.227.101.220
 
